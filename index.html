@@ -33,6 +33,8 @@
   .leaflet-tile{ filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.95) saturate(0.6); }
   .leaflet-tooltip.district-tt{background:var(--panel); color:var(--ink); border:1px solid var(--line);
     font-size:11px; border-radius:5px;}
+  .map-glyph-icon{ pointer-events:none; filter: drop-shadow(0 2px 6px rgba(0,0,0,.5)); }
+  .map-glyph-icon svg{ overflow:visible; }
 
   .filters{position:absolute; top:12px; left:12px; z-index:1200; display:flex; gap:8px;}
   select{background:var(--panel); color:var(--ink); border:1px solid var(--line);
@@ -267,9 +269,31 @@ function drawMarkers(){
       fillColor: scale(rec[currentMetric]), fillOpacity:0.85
     });
     m.bindTooltip(rec.d + " — " + rec.dp, {className:'district-tt', direction:'top', offset:[0,-4]});
-    m.on('click', ()=> { selected = rec; renderSidebar(rec); map.panTo([rec.la, rec.lo], {animate:true}); });
+    m.on('click', ()=> selectDistrict(rec));
     m.addTo(markerLayer);
   });
+}
+
+function selectDistrict(rec){
+  selected = rec;
+  renderSidebar(rec);
+  updateMapGlyph(rec);
+  map.panTo([rec.la, rec.lo], {animate:true});
+}
+
+/* ---------- VisQuill-style glyph anchored ON the map, at the selected point ---------- */
+let glyphMarker = null;
+function updateMapGlyph(rec){
+  if(glyphMarker){ map.removeLayer(glyphMarker); glyphMarker = null; }
+  if(!rec) return;
+  const size = 150;
+  const icon = L.divIcon({
+    className: 'map-glyph-icon',
+    html: glyphSVGString(rec, size, false),
+    iconSize: [size, size],
+    iconAnchor: [size/2, size/2]
+  });
+  glyphMarker = L.marker([rec.la, rec.lo], {icon, interactive:false, zIndexOffset:1000}).addTo(map);
 }
 
 const metricLabels = {gm:"GPC municipal (kg/hab/día)", gd:"GPC doméstico (kg/hab/día)", idh:"IDH 2019", pob:"Pobreza total (%)"};
@@ -308,7 +332,8 @@ function renderSidebar(rec){
   });
 
   html += `<div class="section-title">Glifo radial</div>`;
-  html += `<div class="radar-wrap"><svg id="glyphSvg" width="230" height="230" viewBox="-115 -115 230 230"></svg></div>`;
+  html += `<div class="radar-wrap" id="glyphContainer"></div>`;
+  html += `<div class="note" style="margin-bottom:14px;">Este mismo glifo aparece anclado sobre el punto en el mapa, con el centro hueco para no tapar el pin.</div>`;
 
   if(rec){
     html += `<div class="section-title">Datos adicionales</div>`;
@@ -322,46 +347,48 @@ function renderSidebar(rec){
   html += `<div class="refresh-hint">Los datos se leen de <code>gpc_2019.csv</code>, <code>gpc_2022_no_domiciliario.csv</code> y <code>ubigeo_geo.csv</code> en la misma carpeta. Para actualizar, reemplaza el CSV manteniendo las mismas columnas — no hace falta tocar el HTML.</div>`;
 
   box.innerHTML = html;
-  renderGlyph(rec);
+  const cont = document.getElementById('glyphContainer');
+  if(cont) cont.innerHTML = glyphSVGString(rec, 230, true);
 }
 
-const R = 88, N = AXES.length;
-function pointFor(i, frac){
-  const ang = -Math.PI/2 + i*(2*Math.PI/N);
-  const r = 18 + frac*(R-18);
-  return [r*Math.cos(ang), r*Math.sin(ang)];
-}
-function svgEl(tag, attrs){ const el=document.createElementNS("http://www.w3.org/2000/svg",tag); for(const k in attrs) el.setAttribute(k,attrs[k]); return el; }
-
-function renderGlyph(rec){
-  const svg = document.getElementById('glyphSvg');
-  if(!svg) return;
-  svg.innerHTML = "";
-  [0.3,0.55,0.8,1].forEach(f=>{
-    const pts = AXES.map((a,i)=>pointFor(i,f).join(",")).join(" ");
-    svg.appendChild(svgEl("polygon",{points:pts,class:"ring"}));
-  });
-  AXES.forEach((a,i)=>{
-    const [x,y]=pointFor(i,1);
-    svg.appendChild(svgEl("line",{x1:0,y1:0,x2:x,y2:y,class:"axis-line"}));
-    const [lx,ly]=pointFor(i,1.18);
-    const t = svgEl("text",{x:lx,y:ly,class:"axis-label"}); t.textContent=a.label;
-    svg.appendChild(t);
-  });
-  // transparent hollow center so it's clear the glyph has no solid core
-  svg.appendChild(svgEl("circle",{cx:0,cy:0,r:16,class:"center-hole"}));
-
+/* Shared glyph builder: returns a full <svg> markup string.
+   Used both in the sidebar (larger, with axis labels) and anchored
+   on the map at the selected district's lat/lng (smaller, no labels). */
+function glyphSVGString(rec, size, showLabels){
+  const N = AXES.length;
+  const half = size/2;
+  const holeR = size*0.075;
+  const R = half - size*0.16 - (showLabels? size*0.06 : 0);
+  function pt(i, frac){
+    const ang = -Math.PI/2 + i*(2*Math.PI/N);
+    const r = holeR*1.15 + frac*(R - holeR*1.15);
+    return [r*Math.cos(ang), r*Math.sin(ang)];
+  }
+  const rings = [0.3,0.55,0.8,1].map(f=>
+    `<polygon points="${AXES.map((a,i)=>pt(i,f).join(',')).join(' ')}" class="ring"/>`
+  ).join('');
+  const axesLines = AXES.map((a,i)=>{
+    const [x,y] = pt(i,1);
+    let lbl = '';
+    if(showLabels){
+      const [lx,ly] = pt(i,1.2);
+      lbl = `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" class="axis-label">${a.label}</text>`;
+    }
+    return `<line x1="0" y1="0" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" class="axis-line"/>${lbl}`;
+  }).join('');
   const fracs = AXES.map(a=>{
     const v = rec? rec[a.key] : NATIONAL[a.key];
-    const f = rankers[a.key](v);
-    return f==null? 0.03 : Math.max(f,0.03);
+    const f = rankers[a.key] ? rankers[a.key](v) : null;
+    return f==null ? 0.03 : Math.max(f, 0.03);
   });
-  const pts = fracs.map((f,i)=>pointFor(i,f).join(",")).join(" ");
-  svg.appendChild(svgEl("polygon",{points:pts,class:"glyph-poly"}));
-  fracs.forEach((f,i)=>{
-    const [x,y]=pointFor(i,f);
-    svg.appendChild(svgEl("circle",{cx:x,cy:y,r:3,class:"glyph-dot"}));
-  });
+  const poly = `<polygon points="${fracs.map((f,i)=>pt(i,f).join(',')).join(' ')}" class="glyph-poly"/>`;
+  const dots = fracs.map((f,i)=>{
+    const [x,y] = pt(i,f);
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" class="glyph-dot"/>`;
+  }).join('');
+  // hollow, transparent center so the underlying map pin / focal point stays visible
+  const hole = `<circle cx="0" cy="0" r="${holeR.toFixed(1)}" class="center-hole"/>`;
+  return `<svg width="${size}" height="${size}" viewBox="${-half} ${-half} ${size} ${size}" xmlns="http://www.w3.org/2000/svg">${rings}${axesLines}${hole}${poly}${dots}</svg>`;
 }
 
 boot();
